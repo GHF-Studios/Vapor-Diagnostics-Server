@@ -34,6 +34,24 @@ Expected public API route behind the root reverse proxy:
 Owns diagnostics bundles, diagnostics indexes, retention metadata, and
 diagnostics export/import data.
 
+## Initial routes
+
+```text
+GET  /healthz
+POST /v1/runs
+GET  /v1/runs
+GET  /v1/runs/<run-id>
+GET  /v1/export
+```
+
+Upload is intentionally unauthenticated in the initial scaffold so normal
+players do not need GitHub. Listing, download, and export are protected and
+expect:
+
+```text
+Authorization: Bearer <VAPOR_DIAGNOSTICS_ADMIN_TOKEN>
+```
+
 ## Non-goals
 
 - Steam/GitHub identity authority;
