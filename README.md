@@ -2,6 +2,8 @@
 
 Opt-in diagnostics/log upload service for Vapor.
 
+Initial implementation uses Axum/Tokio.
+
 ## Responsibility
 
 - accept explicit diagnostics uploads;
