@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/status", get(status))
         .route("/v1/runs", post(upload_run).get(list_runs))
         .route("/v1/runs/{run_id}", get(download_run))
         .route("/v1/export", get(export_runs))
@@ -53,6 +54,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn healthz() -> &'static str {
     "ok\n"
+}
+
+async fn status(State(state): State<AppState>) -> impl IntoResponse {
+    let run_count = match read_run_ids(state.state_dir.join("runs")).await {
+        Ok(run_ids) => run_ids.len(),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("diagnostics: failed to list runs: {error}\n"),
+            );
+        }
+    };
+    let body = format!(
+        "service = \"vapor-diagnostics-server\"\nstate = \"{}\"\nruns = {}\nmax_upload_bytes = {}\nupload_auth_model = \"explicit-opt-in-unauthenticated\"\nread_auth_model = \"admin-token-scaffold\"\nhostname_collected = false\npersistent_machine_id_collected = false\n",
+        state.state_dir.display(),
+        run_count,
+        MAX_UPLOAD_BYTES
+    );
+    (StatusCode::OK, body)
 }
 
 async fn upload_run(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {

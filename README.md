@@ -40,11 +40,16 @@ diagnostics export/import data.
 
 ```text
 GET  /healthz
+GET  /v1/status
 POST /v1/runs
 GET  /v1/runs
 GET  /v1/runs/<run-id>
 GET  /v1/export
 ```
+
+`GET /v1/status` is public and reports current storage/readiness, upload limit,
+diagnostics count, collection policy, and temporary auth model. It must not
+expose tokens.
 
 Upload is intentionally unauthenticated in the initial scaffold so normal
 players do not need GitHub. Listing, download, and export are protected and
