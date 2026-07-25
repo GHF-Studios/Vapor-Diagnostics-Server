@@ -40,19 +40,16 @@ diagnostics export/import data.
 
 ```text
 GET  /healthz
-GET  /v1/status
-POST /v1/runs
-GET  /v1/runs
-GET  /v1/runs/<run-id>
-GET  /v1/export
-POST /v2/reports
-GET  /v2/reports
-GET  /v2/reports/<run-id>
+GET  /status
+POST /reports
+GET  /reports
+GET  /reports/<run-id>
+GET  /export
 ```
 
-`GET /v1/status` is public and reports current storage/readiness, upload limit,
+`GET /status` is public and reports current storage/readiness, upload limit,
 configured aggregate storage limit, diagnostics count, collection policy,
-supported schema versions, and temporary auth model. It must not expose tokens.
+and temporary auth model. It must not expose tokens.
 
 Upload is intentionally unauthenticated but explicit opt-in so normal players do
 not need GitHub. Listing, download, and export are protected and expect:
@@ -61,13 +58,12 @@ not need GitHub. Listing, download, and export are protected and expect:
 Authorization: Bearer <VAPOR_DIAGNOSTICS_ADMIN_TOKEN>
 ```
 
-## Diagnostics v2 upload
+## Diagnostics upload
 
-`POST /v2/reports` accepts JSON:
+`POST /reports` accepts JSON:
 
 ```json
 {
-  "schema_version": 2,
   "consent": true,
   "client_version": "local-build-id",
   "platform": {
@@ -95,9 +91,6 @@ Allowed artifact names are:
 The service rejects unknown JSON fields and non-allowlisted artifact names. The
 schema does not include hostname, persistent machine identifier, remote IP,
 account identifier, serial number, or MAC address fields.
-
-The legacy `POST /v1/runs` plain-text upload route remains available and uses
-the same redaction/storage core.
 
 ## Storage and redaction
 

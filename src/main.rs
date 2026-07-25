@@ -42,8 +42,7 @@ struct Config {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DiagnosticsReportV2 {
-    schema_version: u32,
+struct DiagnosticsReport {
     consent: bool,
     client_version: Option<String>,
     platform: Option<PlatformSummary>,
@@ -106,11 +105,9 @@ enum MemoryBucket {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RunMetadata {
-    schema_version: u32,
     run_id: String,
     received_at_unix: u64,
     received_at_unix_ms: u128,
-    source_format: String,
     client_version: Option<String>,
     platform: Option<PlatformSummary>,
     original_bytes: usize,
@@ -122,7 +119,6 @@ struct RunMetadata {
 
 #[derive(Debug, Serialize)]
 struct UploadRunResponse {
-    schema_version: u32,
     run_id: String,
     stored_bytes: usize,
     redaction_count: usize,
@@ -130,7 +126,6 @@ struct UploadRunResponse {
 
 #[derive(Debug, Serialize)]
 struct ListRunsResponse {
-    schema_version: u32,
     runs: Vec<RunSummary>,
 }
 
@@ -138,14 +133,12 @@ struct ListRunsResponse {
 struct RunSummary {
     run_id: String,
     received_at_unix: Option<u64>,
-    source_format: Option<String>,
     stored_bytes: Option<usize>,
     redaction_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
 struct RunDetail {
-    schema_version: u32,
     metadata: RunMetadata,
     vapor_log: String,
 }
@@ -244,12 +237,10 @@ fn parse_max_stored_bytes(value: Option<String>) -> Result<u64, String> {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/status", get(status))
-        .route("/v1/runs", post(upload_run).get(list_runs))
-        .route("/v1/runs/{run_id}", get(download_run))
-        .route("/v1/export", get(export_runs))
-        .route("/v2/reports", post(upload_report_v2).get(list_reports_v2))
-        .route("/v2/reports/{run_id}", get(download_report_v2))
+        .route("/status", get(status))
+        .route("/reports", post(upload_report).get(list_reports))
+        .route("/reports/{run_id}", get(download_report))
+        .route("/export", get(export_runs))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state)
 }
@@ -271,7 +262,7 @@ async fn status(State(state): State<AppState>) -> Response {
     };
     let stored_bytes = directory_size(&state.state_dir.join("runs")).unwrap_or_default();
     let body = format!(
-        "service = \"vapor-diagnostics-server\"\nstate = \"{}\"\nruns = {}\nmax_upload_bytes = {}\nmax_stored_bytes = {}\nstored_bytes = {}\nschema_versions = [1, 2]\nupload_auth_model = \"explicit-opt-in-unauthenticated\"\nread_auth_model = \"admin-token-scaffold\"\nhostname_collected = false\npersistent_machine_id_collected = false\n",
+        "service = \"vapor-diagnostics-server\"\nstate = \"{}\"\nruns = {}\nmax_upload_bytes = {}\nmax_stored_bytes = {}\nstored_bytes = {}\nupload_auth_model = \"explicit-opt-in-unauthenticated\"\nread_auth_model = \"admin-token-scaffold\"\nhostname_collected = false\npersistent_machine_id_collected = false\n",
         state.state_dir.display(),
         run_count,
         MAX_UPLOAD_BYTES,
@@ -281,33 +272,17 @@ async fn status(State(state): State<AppState>) -> Response {
     (StatusCode::OK, body).into_response()
 }
 
-async fn upload_run(State(state): State<AppState>, body: Bytes) -> Response {
+async fn upload_report(State(state): State<AppState>, body: Bytes) -> Response {
     if body.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty diagnostics upload\n").into_response();
     }
 
-    let raw = String::from_utf8_lossy(&body);
-    match store_run(&state, "legacy-text", None, None, raw.as_ref(), body.len()).await {
-        Ok(stored) => (
-            StatusCode::CREATED,
-            format!("diagnostics: uploaded run {}\n", stored.run_id),
-        )
-            .into_response(),
-        Err(error) => store_error_response(error),
-    }
-}
-
-async fn upload_report_v2(State(state): State<AppState>, body: Bytes) -> Response {
-    if body.is_empty() {
-        return (StatusCode::BAD_REQUEST, "empty diagnostics upload\n").into_response();
-    }
-
-    let report = match serde_json::from_slice::<DiagnosticsReportV2>(&body) {
+    let report = match serde_json::from_slice::<DiagnosticsReport>(&body) {
         Ok(report) => report,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("invalid diagnostics v2 JSON: {error}\n"),
+                format!("invalid diagnostics report JSON: {error}\n"),
             )
                 .into_response();
         }
@@ -319,7 +294,6 @@ async fn upload_report_v2(State(state): State<AppState>, body: Bytes) -> Respons
 
     match store_run(
         &state,
-        "diagnostics-report-v2",
         prepared.client_version,
         prepared.platform,
         &prepared.log_text,
@@ -330,7 +304,6 @@ async fn upload_report_v2(State(state): State<AppState>, body: Bytes) -> Respons
         Ok(stored) => (
             StatusCode::CREATED,
             Json(UploadRunResponse {
-                schema_version: 2,
                 run_id: stored.run_id,
                 stored_bytes: stored.stored_bytes,
                 redaction_count: stored.redaction_count,
@@ -341,26 +314,7 @@ async fn upload_report_v2(State(state): State<AppState>, body: Bytes) -> Respons
     }
 }
 
-async fn list_runs(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !authorized(&headers, &state.admin_token) {
-        return (StatusCode::UNAUTHORIZED, "missing or invalid admin token\n").into_response();
-    }
-
-    let mut run_ids = match read_run_ids(state.state_dir.join("runs")).await {
-        Ok(run_ids) => run_ids,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("diagnostics: failed to list runs: {error}\n"),
-            )
-                .into_response()
-        }
-    };
-    run_ids.sort();
-    (StatusCode::OK, format!("{}\n", run_ids.join("\n"))).into_response()
-}
-
-async fn list_reports_v2(
+async fn list_reports(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
@@ -371,14 +325,7 @@ async fn list_reports_v2(
 
     let limit = query.limit.unwrap_or(50).min(MAX_LIST_LIMIT);
     match read_run_summaries(state.state_dir.join("runs"), limit).await {
-        Ok(runs) => (
-            StatusCode::OK,
-            Json(ListRunsResponse {
-                schema_version: 2,
-                runs,
-            }),
-        )
-            .into_response(),
+        Ok(runs) => (StatusCode::OK, Json(ListRunsResponse { runs })).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("diagnostics: failed to list reports: {error}\n"),
@@ -387,34 +334,7 @@ async fn list_reports_v2(
     }
 }
 
-async fn download_run(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(run_id): Path<String>,
-) -> Response {
-    if !authorized(&headers, &state.admin_token) {
-        return (StatusCode::UNAUTHORIZED, "missing or invalid admin token\n").into_response();
-    }
-    if !valid_run_id(&run_id) {
-        return (StatusCode::BAD_REQUEST, "invalid diagnostics run id\n").into_response();
-    }
-
-    let run_dir = state.state_dir.join("runs").join(&run_id);
-    let metadata = fs::read_to_string(run_dir.join("metadata.toml"))
-        .await
-        .unwrap_or_default();
-    let log = fs::read_to_string(run_dir.join("vapor.log"))
-        .await
-        .unwrap_or_default();
-    if metadata.is_empty() && log.is_empty() {
-        return (StatusCode::NOT_FOUND, "diagnostics run not found\n").into_response();
-    }
-
-    let body = format!("# {run_id}\n\n--- metadata.toml ---\n{metadata}\n--- vapor.log ---\n{log}");
-    (StatusCode::OK, body).into_response()
-}
-
-async fn download_report_v2(
+async fn download_report(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
@@ -444,7 +364,6 @@ async fn download_report_v2(
     (
         StatusCode::OK,
         Json(RunDetail {
-            schema_version: 2,
             metadata,
             vapor_log,
         }),
@@ -480,13 +399,10 @@ async fn export_runs(State(state): State<AppState>, headers: HeaderMap) -> Respo
     (StatusCode::OK, body).into_response()
 }
 
-impl DiagnosticsReportV2 {
+impl DiagnosticsReport {
     fn into_prepared_report(self) -> Result<PreparedReport, String> {
-        if self.schema_version != 2 {
-            return Err("diagnostics v2 upload requires schema_version = 2".to_string());
-        }
         if !self.consent {
-            return Err("diagnostics v2 upload requires consent = true".to_string());
+            return Err("diagnostics upload requires consent = true".to_string());
         }
 
         let mut sections = BTreeMap::new();
@@ -498,7 +414,7 @@ impl DiagnosticsReportV2 {
         for artifact in self.artifacts {
             if !allowed_artifact_name(&artifact.name) {
                 return Err(format!(
-                    "diagnostics v2 artifact '{}' is not allowlisted",
+                    "diagnostics artifact '{}' is not allowlisted",
                     artifact.name
                 ));
             }
@@ -508,7 +424,7 @@ impl DiagnosticsReportV2 {
             sections.insert(artifact.name, artifact.content);
         }
         if sections.is_empty() {
-            return Err("diagnostics v2 upload must include log text or artifacts".to_string());
+            return Err("diagnostics upload must include log text or artifacts".to_string());
         }
 
         let mut text = String::new();
@@ -553,7 +469,6 @@ fn safe_inline(input: &str) -> String {
 
 async fn store_run(
     state: &AppState,
-    source_format: &str,
     client_version: Option<String>,
     platform: Option<PlatformSummary>,
     raw_text: &str,
@@ -581,11 +496,9 @@ async fn store_run(
 
     fs::create_dir(&staging_dir).await?;
     let metadata = RunMetadata {
-        schema_version: 2,
         run_id: run_id.clone(),
         received_at_unix,
         received_at_unix_ms,
-        source_format: source_format.to_string(),
         client_version,
         platform,
         original_bytes,
@@ -623,12 +536,10 @@ fn unique_run_id(runs_dir: &FsPath, received_at_unix_ms: u128) -> std::io::Resul
 
 fn metadata_toml(metadata: &RunMetadata) -> String {
     format!(
-        "schema_version = {}\nrun_id = \"{}\"\nreceived_at_unix = {}\nreceived_at_unix_ms = {}\nsource_format = \"{}\"\nclient_version = {}\noriginal_bytes = {}\nstored_bytes = {}\nredaction_count = {}\nhostname_collected = false\npersistent_machine_id_collected = false\n",
-        metadata.schema_version,
+        "run_id = \"{}\"\nreceived_at_unix = {}\nreceived_at_unix_ms = {}\nclient_version = {}\noriginal_bytes = {}\nstored_bytes = {}\nredaction_count = {}\nhostname_collected = false\npersistent_machine_id_collected = false\n",
         metadata.run_id,
         metadata.received_at_unix,
         metadata.received_at_unix_ms,
-        metadata.source_format,
         metadata
             .client_version
             .as_ref()
@@ -689,14 +600,12 @@ async fn read_run_summaries(runs_dir: PathBuf, limit: usize) -> std::io::Result<
             Some(metadata) => summaries.push(RunSummary {
                 run_id,
                 received_at_unix: Some(metadata.received_at_unix),
-                source_format: Some(metadata.source_format),
                 stored_bytes: Some(metadata.stored_bytes),
                 redaction_count: Some(metadata.redaction_count),
             }),
             None => summaries.push(RunSummary {
                 run_id,
                 received_at_unix: None,
-                source_format: None,
                 stored_bytes: None,
                 redaction_count: None,
             }),
@@ -813,8 +722,7 @@ mod tests {
 
     #[test]
     fn rejects_non_allowlisted_artifact_names() {
-        let report = DiagnosticsReportV2 {
-            schema_version: 2,
+        let report = DiagnosticsReport {
             consent: true,
             client_version: None,
             platform: None,
